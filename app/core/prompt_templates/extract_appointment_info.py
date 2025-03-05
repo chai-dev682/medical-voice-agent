@@ -11,4 +11,6 @@ The current date and time is:
 
 Conversation History:
     {conversation_history}
+
+If the conversation history does not contain any appointment details, return None.
 """
