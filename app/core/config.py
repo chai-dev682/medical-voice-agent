@@ -15,6 +15,11 @@ class Settings(BaseSettings):
     ELEVENLABS_API_KEY: str
     ELEVENLABS_AGENT_ID: str
     
+    # Oystehr settings
+    OYSTEHR_API_URL: str = "https://fhir-api.zapehr.com/r4b"
+    OYSTEHR_AUTH_TOKEN: str
+    OYSTEHR_PROJECT_ID: str
+    
     class Config:
         env_file = ".env"
         case_sensitive = True
