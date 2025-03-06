@@ -30,7 +30,7 @@ def handle_user_transcript(conversation_history: ChatMessageHistory, text: str):
     conversation_history.add_user_message(HumanMessage(content=text))
     logger.info(f"User: {text}")
 
-def requires_human_handoff(conversation_history) -> bool:
+def requires_human_handoff(conversation_history) -> dict:
     try:
         result = function_call(human_handoff_detect_prompt.format(conversation_history=format_conversation_history(conversation_history)), "detect_human_handoff")
         # Log the analysis
@@ -40,7 +40,7 @@ def requires_human_handoff(conversation_history) -> bool:
     except Exception as e:
         logger.error(f"Error in human handoff detection: {str(e)}")
         traceback.print_exc()
-        return False
+        return {"is_human_handoff": False}
 
 async def warm_transfer_to_human_services(websocket: WebSocket, call_warm_transferred: dict):
     try:
@@ -74,7 +74,7 @@ async def warm_transfer_to_human_services(websocket: WebSocket, call_warm_transf
         emergency_reason = getattr(websocket, "human_handoff_text", "Potential human handoff")
         
         # TODO: Configure this in your settings
-        human_handoff_number = '+18144952719'
+        human_handoff_number = '+19095767898'
         
         # Create TwiML that first plays a message explaining the situation before joining the conference
         twiml = f"""
@@ -126,11 +126,10 @@ async def handle_media_stream(websocket: WebSocket):
     call_warm_transferred = {"transferred": False}
 
     # Create a simpler callback that just checks and logs
-    def create_human_handoff_aware_agent_response_callback(conversation_history, websocket):
+    def create_human_handoff_aware_user_transcript_callback(conversation_history, websocket):
         def enhanced_callback(text):
             # Call the original callback
-            handle_agent_response(conversation_history, text)
-            
+            handle_user_transcript(conversation_history, text)
             # Check if human handoff is required
             result = requires_human_handoff(conversation_history)
             if result["is_human_handoff"]:
@@ -151,8 +150,8 @@ async def handle_media_stream(websocket: WebSocket):
             agent_id=settings.ELEVENLABS_AGENT_ID,
             requires_auth=True, # Security > Enable authentication
             audio_interface=audio_interface,
-            callback_agent_response=create_human_handoff_aware_agent_response_callback(conversation_history, websocket),
-            callback_user_transcript=lambda text: handle_user_transcript(conversation_history, text),
+            callback_agent_response=lambda text: handle_agent_response(conversation_history, text),
+            callback_user_transcript=create_human_handoff_aware_user_transcript_callback(conversation_history, websocket),
         )
 
         conversation.start_session()

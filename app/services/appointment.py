@@ -8,12 +8,12 @@ from app.core.prompt_templates.extract_appointment_info import extract_appointme
 from app.utils.function_call import function_call
 from app.utils.utils import format_conversation_history, get_current_datetime
 from app.services.twilio_sms import SMSService
-
-sms_service = SMSService()
+from app.services.oystehr import OystehrService
 
 class AppointmentService:
     def __init__(self):
-        pass
+        self.sms_service = SMSService()
+        self.oystehr_service = OystehrService()
 
     def extract_appointment_details(self, conversation_history: ChatMessageHistory) -> Optional[Appointment]:
         """Extract appointment details from conversation text using OpenAI function calling."""
@@ -45,18 +45,24 @@ class AppointmentService:
         
         if appointment:
             try:
-                appointment_details = self.format_appointment_details(appointment)
-
-                await sms_service.send_confirmation(
-                    appointment.phone_number,
-                    appointment_details
-                )
-                logger.info(f"SMS confirmation sent to {appointment.phone_number}")
+                # Create appointment in Oystehr
+                if await self.oystehr_service.create_appointment(appointment):
+                    # Format and send SMS confirmation
+                    appointment_details = self.format_appointment_details(appointment)
+                    await self.sms_service.send_confirmation(
+                        appointment.phone_number,
+                        appointment_details
+                    )
+                    logger.info(f"SMS confirmation sent to {appointment.phone_number}")
+                    return True
+                return False
             except Exception as e:
-                logger.error(f"Error sending SMS confirmation: {e}")
+                logger.error(f"Error in appointment scheduling workflow: {e}")
+                return False
         else:
             logger.info("No appointment details could be extracted from conversation")
-    
+            return False
+
     @staticmethod
     def format_appointment_details(appointment: Appointment) -> str:
         """Format appointment details for SMS confirmation."""
