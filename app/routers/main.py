@@ -1,5 +1,6 @@
 import json
 import traceback
+import asyncio
 from fastapi import APIRouter, Request, WebSocket
 from fastapi.responses import HTMLResponse
 from langchain_core.messages import AIMessage, HumanMessage
@@ -16,7 +17,7 @@ from app.core.config import settings
 from app.core.logger import logger
 from app.utils.utils import format_conversation_history
 from app.utils.function_call import function_call
-from app.core.prompt_templates.human_handoff_detect import human_handoff_detect_prompt
+from app.core.prompt_templates.detect_appointment_action import detect_appointment_action_prompt
 
 router = APIRouter()
 
@@ -30,21 +31,8 @@ def handle_user_transcript(conversation_history: ChatMessageHistory, text: str):
     conversation_history.add_user_message(HumanMessage(content=text))
     logger.info(f"User: {text}")
 
-def requires_human_handoff(conversation_history) -> dict:
+async def warm_transfer_to_human_services(websocket: WebSocket):
     try:
-        result = function_call(human_handoff_detect_prompt.format(conversation_history=format_conversation_history(conversation_history)), "detect_human_handoff")
-        # Log the analysis
-        logger.info(f"Human handoff required: {result['is_human_handoff']}")
-        return result
-        
-    except Exception as e:
-        logger.error(f"Error in human handoff detection: {str(e)}")
-        traceback.print_exc()
-        return {"is_human_handoff": False}
-
-async def warm_transfer_to_human_services(websocket: WebSocket, call_warm_transferred: dict):
-    try:
-        call_warm_transferred["transferred"] = True
         # Get the call SID from the websocket
         call_sid = getattr(websocket, "call_sid", None)
         if not call_sid:
@@ -102,6 +90,22 @@ async def warm_transfer_to_human_services(websocket: WebSocket, call_warm_transf
         logger.info(f"Error transferring call to human handoff: {str(e)}")
         traceback.print_exc()
 
+async def detect_conversation_action(conversation_history: ChatMessageHistory) -> dict:
+    """Detect whether the conversation requires new appointment, rescheduling, or human handoff."""
+    try:
+        result = function_call(
+            detect_appointment_action_prompt.format(
+                conversation_history=format_conversation_history(conversation_history)
+            ),
+            "detect_appointment_action"
+        )
+        logger.info(f"Conversation action detected: {result['action_type']}")
+        return result
+    except Exception as e:
+        logger.error(f"Error in conversation action detection: {str(e)}")
+        traceback.print_exc()
+        return {"action_type": "new_appointment", "reason": "Error in detection", "existing_appointment_mentioned": False}
+
 @router.post("/twilio/inbound_call")
 async def handle_incoming_call(request: Request):
     form_data = await request.form()
@@ -123,27 +127,32 @@ async def handle_media_stream(websocket: WebSocket):
     audio_interface = TwilioAudioInterface(websocket)
     eleven_labs_client = ElevenLabs(api_key=settings.ELEVENLABS_API_KEY)
     conversation_history = ChatMessageHistory()
-    call_warm_transferred = {"transferred": False}
+    action_needed = {"human_handoff": False, "reschedule_requested": False}
 
     # Create a simpler callback that just checks and logs
-    def create_human_handoff_aware_user_transcript_callback(conversation_history, websocket):
+    def user_followup_callback(conversation_history, websocket):
         def enhanced_callback(text):
             # Call the original callback
             handle_user_transcript(conversation_history, text)
-            # Check if human handoff is required
-            result = requires_human_handoff(conversation_history)
-            if result["is_human_handoff"]:
-                logger.info(f"HUMAN HANDOFF DETECTED: {result['reason']}")
-                # Set a flag that we'll check in the main WebSocket loop
-                websocket.human_handoff = True
-                websocket.human_handoff_text = result["reason"]
+            
+            # Check conversation action
+            action = asyncio.run(detect_conversation_action(conversation_history))
+            
+            if action["action_type"] == "human_handoff":
+                logger.info(f"HUMAN HANDOFF DETECTED: {action['reason']}")
+                action_needed["human_handoff"] = True
+                websocket.human_handoff_text = action["reason"]
+            elif action["action_type"] == "reschedule":
+                logger.info(f"RESCHEDULE DETECTED: {action['reason']}")
+                action_needed["reschedule_requested"] = True
+                websocket.reschedule_reason = action["reason"]
         
         return enhanced_callback
 
     try:
         websocket.stream_sid = None
-        websocket.human_handoff = False
         websocket.human_handoff_text = None
+        websocket.reschedule_reason = None
 
         conversation = Conversation(
             client=eleven_labs_client,
@@ -151,7 +160,7 @@ async def handle_media_stream(websocket: WebSocket):
             requires_auth=True, # Security > Enable authentication
             audio_interface=audio_interface,
             callback_agent_response=lambda text: handle_agent_response(conversation_history, text),
-            callback_user_transcript=create_human_handoff_aware_user_transcript_callback(conversation_history, websocket),
+            callback_user_transcript=user_followup_callback(conversation_history, websocket),
         )
 
         conversation.start_session()
@@ -169,13 +178,15 @@ async def handle_media_stream(websocket: WebSocket):
                     websocket.call_sid = data["start"].get("callSid")
                     logger.info(f"Stored stream SID: {websocket.stream_sid}")
                     logger.info(f"Stored call SID: {websocket.call_sid}")
-                elif data.get("event") == "stop" and "stop" in data and not call_warm_transferred["transferred"]:
-                    await appointment_service.schedule_appointment(conversation_history)
+                elif data.get("event") == "stop" and "stop" in data:
+                    if action_needed["reschedule_requested"]:
+                        await appointment_service.reschedule_appointment(conversation_history)
+                    else:
+                        await appointment_service.schedule_appointment(conversation_history)
 
-                # Check if we need to handle a human handoff
-                if getattr(websocket, "human_handoff", False):
-                    websocket.human_handoff = False  # Reset the flag
-                    await warm_transfer_to_human_services(websocket, call_warm_transferred)
+                # Check for human handoff or handle the message
+                if action_needed["human_handoff"]:
+                    await warm_transfer_to_human_services(websocket)
                 else:
                     await audio_interface.handle_twilio_message(data)
                 
@@ -186,7 +197,7 @@ async def handle_media_stream(websocket: WebSocket):
     except WebSocketDisconnect:
         logger.info("WebSocket disconnected")
         # Process conversation after disconnect
-        if not call_warm_transferred["transferred"]:
+        if not action_needed["human_handoff"]:
             await appointment_service.schedule_appointment(conversation_history)
 
     except Exception:
