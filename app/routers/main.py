@@ -128,6 +128,7 @@ async def handle_media_stream(websocket: WebSocket):
     eleven_labs_client = ElevenLabs(api_key=settings.ELEVENLABS_API_KEY)
     conversation_history = ChatMessageHistory()
     action_needed = {"human_handoff": False, "reschedule_requested": False}
+    call_transferred = False
 
     # Create a simpler callback that just checks and logs
     def user_followup_callback(conversation_history, websocket):
@@ -185,9 +186,10 @@ async def handle_media_stream(websocket: WebSocket):
                         await appointment_service.schedule_appointment(conversation_history)
 
                 # Check for human handoff or handle the message
-                if action_needed["human_handoff"]:
+                if action_needed["human_handoff"] and not call_transferred:
+                    call_transferred = True
                     await warm_transfer_to_human_services(websocket)
-                else:
+                elif not action_needed["human_handoff"]:
                     await audio_interface.handle_twilio_message(data)
                 
             except Exception as e:

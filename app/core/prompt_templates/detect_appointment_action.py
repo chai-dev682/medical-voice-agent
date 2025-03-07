@@ -25,4 +25,5 @@ Conversation History:
 {conversation_history}
 
 Determine the appropriate action based on the conversation content.
+Remember: Only use human handoff when absolutely necessary. In most cases, you can simply tell the user to schedule or reschedule.
 """
